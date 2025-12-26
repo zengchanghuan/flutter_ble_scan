@@ -333,19 +333,25 @@ class _DeviceDetailScreenState extends State<DeviceDetailScreen> {
                 ? Colors.green[100]
                 : Colors.grey[200],
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '连接状态: ${_connectionState.toString().split('.').last}',
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 4),
-                    Text('ID: ${widget.device.remoteId}'),
-                  ],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '连接状态: ${_connectionState.toString().split('.').last}',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'ID: ${widget.device.remoteId}',
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                      ),
+                    ],
+                  ),
                 ),
+                const SizedBox(width: 8),
                 ElevatedButton(
                   onPressed: _connectionState == BluetoothConnectionState.connected
                       ? _disconnect
@@ -355,6 +361,7 @@ class _DeviceDetailScreenState extends State<DeviceDetailScreen> {
                         ? Colors.red
                         : Colors.green,
                     foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   ),
                   child: Text(
                     _connectionState == BluetoothConnectionState.connected
