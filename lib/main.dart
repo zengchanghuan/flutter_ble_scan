@@ -162,8 +162,11 @@ class _ScannerScreenState extends State<ScannerScreen> {
           _deviceManager.updateDeviceInfo(deviceId, rssi: result.rssi);
         }
         
-        // 自动连接M302和VIP设备
+        // 自动连接M302和VIP设备（持续检测新设备）
         _autoConnectTargetDevices(targetDevices);
+        
+        // 刷新已连接设备列表，确保UI实时更新
+        _refreshConnectedDevices();
       }
     });
   }
@@ -390,7 +393,8 @@ class _ScannerScreenState extends State<ScannerScreen> {
   // 定期刷新已连接设备列表，以便更新电量等信息
   void _startPeriodicRefresh() {
     Future.delayed(const Duration(seconds: 2), () {
-      if (mounted && _selectedTabIndex == 0) {
+      if (mounted) {
+        // 无论哪个Tab都刷新，确保UI实时更新
         _refreshConnectedDevices();
         _startPeriodicRefresh(); // 递归调用，持续刷新
       }
@@ -400,12 +404,36 @@ class _ScannerScreenState extends State<ScannerScreen> {
   void _refreshConnectedDevices() {
     try {
       final devices = FlutterBluePlus.connectedDevices;
+      final previousCount = _connectedDevices.length;
+      
       if (mounted) {
+        // 合并已连接设备，不清空原有设备，只添加新设备
+        final newDevices = <DeviceIdentifier, BluetoothDevice>{};
+        
+        // 保留原有的已连接设备（如果它们仍然连接）
+        for (var entry in _connectedDevices.entries) {
+          // 检查设备是否仍然在系统已连接列表中
+          if (devices.any((d) => d.remoteId == entry.key)) {
+            newDevices[entry.key] = entry.value;
+          }
+        }
+        
+        // 添加新连接的设备
+        for (var device in devices) {
+          if (!newDevices.containsKey(device.remoteId)) {
+            newDevices[device.remoteId] = device;
+            print('➕ [UI更新] 新增已连接设备: ${device.platformName} (${device.remoteId})');
+          }
+        }
+        
         setState(() {
-          _connectedDevices = {
-            for (var device in devices) device.remoteId: device
-          };
+          _connectedDevices = newDevices;
         });
+        
+        // 如果连接设备数量发生变化，触发UI更新
+        if (_connectedDevices.length != previousCount) {
+          print('🔄 [UI更新] 已连接设备数量变化: $previousCount -> ${_connectedDevices.length}');
+        }
       }
       
       // 同时更新设备管理器中的连接状态
@@ -418,7 +446,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
         }
       }
     } catch (e) {
-      // 忽略错误
+      print('刷新已连接设备失败: $e');
     }
   }
 
@@ -428,15 +456,38 @@ class _ScannerScreenState extends State<ScannerScreen> {
       return;
     }
 
+    // 如果已经在扫描，不重复启动
+    if (_isScanning) {
+      return;
+    }
+
     setState(() {
       _isScanning = true;
-      _scanResults.clear();
+      // 不清空扫描结果，保留已扫描到的设备
     });
 
+    // 开始扫描，设置较长的超时时间，扫描结束后自动重新开始
     FlutterBluePlus.startScan(
-      timeout: const Duration(seconds: 15),
+      timeout: const Duration(seconds: 30), // 延长到30秒
       withServices: [],
-    );
+    ).then((_) {
+      // 扫描超时后，如果还在扫描状态，自动重新开始扫描
+      if (mounted && _isScanning && _adapterState == BluetoothAdapterState.on) {
+        print('🔄 [扫描] 扫描超时，自动重新开始扫描');
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (mounted && _isScanning && _adapterState == BluetoothAdapterState.on) {
+            _startScan();
+          }
+        });
+      }
+    }).catchError((error) {
+      print('扫描错误: $error');
+      if (mounted) {
+        setState(() {
+          _isScanning = false;
+        });
+      }
+    });
   }
 
   void _stopScan() {
@@ -2169,173 +2220,91 @@ class DeviceInfoTile extends StatelessWidget {
           size: 32,
         ),
         title: Row(
-          children: [
-            Expanded(
-              child: Text(
-                _getDisplayName(deviceInfo.name),
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ),
-            if (_isVipDevice(deviceInfo.name))
-              Container(
-                margin: const EdgeInsets.only(left: 8),
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [Colors.purple, Colors.pink],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  borderRadius: BorderRadius.circular(10),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.purple.withOpacity(0.3),
-                      blurRadius: 4,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
-                child: const Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.star,
-                      size: 12,
-                      color: Colors.white,
-                    ),
-                    SizedBox(width: 2),
-                    Text(
-                      'VIP',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-          ],
-        ),
-        subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const SizedBox(height: 4),
-            // 地址
-            Row(
-              children: [
-                const Icon(Icons.location_on, size: 14, color: Colors.grey),
-                const SizedBox(width: 4),
-                Expanded(
-                  child: Text(
-                    '地址: ${deviceInfo.address}',
-                    style: const TextStyle(fontSize: 12),
+            // 左侧：设备名和详细信息
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 设备名
+                  Text(
+                    _getDisplayName(deviceInfo.name),
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
                     overflow: TextOverflow.ellipsis,
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            // 信号强度和电量
-            Wrap(
-              spacing: 12,
-              runSpacing: 4,
-              children: [
-                // 信号强度
-                if (deviceInfo.rssi != null)
+                  const SizedBox(height: 4),
+                  // MAC地址和功率值上下显示
                   Row(
-                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(
-                        Icons.signal_cellular_alt,
-                        size: 14,
-                        color: _getRssiColor(deviceInfo.rssi),
+                      // MAC地址
+                      Expanded(
+                        child: Text(
+                          deviceInfo.address,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey,
+                            fontFamily: 'monospace',
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
-                      const SizedBox(width: 4),
-                      Text(
-                        '${deviceInfo.rssi} dBm',
-                        style: TextStyle(
-                          fontSize: 12,
+                    ],
+                  ),
+                  if (deviceInfo.rssi != null) ...[
+                    const SizedBox(height: 2),
+                    // 功率值（RSSI）
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.signal_cellular_alt,
+                          size: 14,
                           color: _getRssiColor(deviceInfo.rssi),
                         ),
-                      ),
-                    ],
-                  ),
-                // 电量
-                if (deviceInfo.batteryLevel != null)
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        _getBatteryIcon(deviceInfo.batteryLevel),
-                        size: 14,
-                        color: _getBatteryColor(deviceInfo.batteryLevel),
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        '${deviceInfo.batteryLevel}%',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: _getBatteryColor(deviceInfo.batteryLevel),
-                          fontWeight: FontWeight.bold,
+                        const SizedBox(width: 4),
+                        Text(
+                          '${deviceInfo.rssi} dBm',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: _getRssiColor(deviceInfo.rssi),
+                            fontWeight: FontWeight.w500,
+                          ),
                         ),
-                      ),
-                    ],
-                  )
-                else if (isConnected)
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      const Text(
-                        '获取电量中...',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey,
-                        ),
-                      ),
-                    ],
-                  ),
-              ],
-            ),
-            // 连接状态
-            const SizedBox(height: 4),
-            Text(
-              isConnected ? '● 已连接' : '○ 未连接',
-              style: TextStyle(
-                fontSize: 12,
-                color: isConnected ? Colors.green : Colors.grey,
-                fontWeight: FontWeight.bold,
+                      ],
+                    ),
+                  ],
+                ],
               ),
             ),
+            const SizedBox(width: 8),
+            // 右侧：电量
+            if (deviceInfo.batteryLevel != null)
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    _getBatteryIcon(deviceInfo.batteryLevel),
+                    size: 20,
+                    color: _getBatteryColor(deviceInfo.batteryLevel),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${deviceInfo.batteryLevel}%',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: _getBatteryColor(deviceInfo.batteryLevel),
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
           ],
         ),
-        isThreeLine: true,
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (onRemove != null)
-              IconButton(
-                icon: const Icon(Icons.delete_outline, color: Colors.grey),
-                onPressed: onRemove,
-                tooltip: '移除配对',
-              ),
-            if (isConnected && onDisconnect != null)
-              IconButton(
-                icon: const Icon(Icons.close, color: Colors.red),
-                onPressed: onDisconnect,
-                tooltip: '断开连接',
-              ),
-            if (onTap != null) const Icon(Icons.chevron_right),
-          ],
-        ),
+        trailing: onTap != null ? const Icon(Icons.chevron_right) : null,
         onTap: onTap,
       ),
     );
