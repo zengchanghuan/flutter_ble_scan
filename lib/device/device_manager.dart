@@ -253,8 +253,18 @@ class DeviceManager {
       print('🔧 [DeviceManager] 调用device.connect()');
       final connectStartTime = DateTime.now();
       
+      // 先检查设备当前连接状态
+      final currentState = device.connectionState;
+      if (currentState == BluetoothConnectionState.connected) {
+        print('🔧 [DeviceManager] 设备已连接，跳过连接操作');
+        _connectedDevices[deviceId] = device;
+        await addPairedDevice(device);
+        return true;
+      }
+      
+      // 增加超时时间到3秒，提高连接成功率
       await device.connect(
-        timeout: const Duration(seconds: 1),
+        timeout: const Duration(seconds: 3),
         autoConnect: false,
       );
       

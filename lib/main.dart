@@ -246,8 +246,28 @@ class _ScannerScreenState extends State<ScannerScreen> {
     
     print('🔗 [自动连接] 准备连接 ${devicesToConnect.length} 个设备');
     
-    // 并行连接所有需要连接的设备
-    final connectionFutures = devicesToConnect.map((result) async {
+    // 限制并行连接数量，避免超过系统限制（最多同时连接3个设备）
+    // 将设备分批连接，每批最多3个
+    const maxConcurrentConnections = 3;
+    final batches = <List<ScanResult>>[];
+    for (var i = 0; i < devicesToConnect.length; i += maxConcurrentConnections) {
+      batches.add(devicesToConnect.sublist(
+        i,
+        i + maxConcurrentConnections > devicesToConnect.length
+            ? devicesToConnect.length
+            : i + maxConcurrentConnections,
+      ));
+    }
+    
+    print('🔗 [自动连接] 将 ${devicesToConnect.length} 个设备分为 ${batches.length} 批连接');
+    
+    // 逐批连接设备
+    for (var batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      final batch = batches[batchIndex];
+      print('🔗 [自动连接] 开始连接第 ${batchIndex + 1}/${batches.length} 批（${batch.length} 个设备）');
+      
+      // 并行连接当前批次的设备
+      final connectionFutures = batch.map((result) async {
       final device = result.device;
       final deviceId = device.remoteId.toString();
       final deviceName = device.platformName;
@@ -286,9 +306,45 @@ class _ScannerScreenState extends State<ScannerScreen> {
         
         print('🔗 [自动连接] 开始连接设备: $deviceName ($deviceId)');
         
-        // 使用设备管理器连接（会自动保存为配对设备）
+        // 在连接前再次检查设备状态（可能已经连接）
+        if (device.connectionState == BluetoothConnectionState.connected) {
+          print('🔗 [自动连接] 设备已连接，跳过连接操作: $deviceName ($deviceId)');
+          if (mounted) {
+            setState(() {
+              _connectedDevices[device.remoteId] = device;
+            });
+            _refreshConnectedDevices();
+            _showSnackBar('设备已连接: ${isVip ? "VIP" : deviceName}');
+          }
+          return;
+        }
+        
+        // 使用设备管理器连接（带重试机制）
         final connectStartTime = DateTime.now();
-        final connected = await _deviceManager.connectDevice(device);
+        bool connected = false;
+        const maxRetries = 2; // 最多重试2次
+        
+        for (var retry = 0; retry <= maxRetries; retry++) {
+          if (retry > 0) {
+            print('🔗 [自动连接] 第 $retry 次重试连接: $deviceName ($deviceId)');
+            // 重试前等待一段时间，避免频繁连接
+            await Future.delayed(Duration(milliseconds: 500 * retry));
+          }
+          
+          connected = await _deviceManager.connectDevice(device);
+          
+          if (connected) {
+            break; // 连接成功，退出重试循环
+          }
+          
+          // 检查设备是否在重试期间已经连接
+          if (device.connectionState == BluetoothConnectionState.connected) {
+            print('🔗 [自动连接] 重试期间设备已连接: $deviceName ($deviceId)');
+            connected = true;
+            break;
+          }
+        }
+        
         final connectDuration = DateTime.now().difference(connectStartTime);
         
         if (isM302 || isVip || isA400Device) {
@@ -374,12 +430,20 @@ class _ScannerScreenState extends State<ScannerScreen> {
           });
         }
       }
-    }).toList();
+      }).toList();
+      
+      // 等待当前批次的所有连接任务完成
+      await Future.wait(connectionFutures, eagerError: false);
+      
+      print('🔗 [自动连接] 第 ${batchIndex + 1} 批连接完成');
+      
+      // 批次之间添加短暂延迟，避免系统过载
+      if (batchIndex < batches.length - 1) {
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+    }
     
-    // 等待所有连接任务完成（不阻塞，允许并行执行）
-    await Future.wait(connectionFutures, eagerError: false);
-    
-    print('所有自动连接任务完成，已连接设备数: ${_connectedDevices.length}');
+    print('🔗 [自动连接] 所有批次连接完成，已连接设备数: ${_connectedDevices.length}');
   }
 
   void _listenToConnectedDevices() {
@@ -1564,8 +1628,8 @@ class _DeviceDetailScreenState extends State<DeviceDetailScreen> {
         // 查找用于协议通信的特征值
         _findProtocolCharacteristics(services);
         
-        // 暂时不获取电量
-        // _readStandardBatteryLevel(services);
+        // 连接成功后获取一次电量（不反复获取）
+        _readStandardBatteryLevel(services);
       }
     } catch (e) {
       if (mounted) {
@@ -1744,7 +1808,9 @@ class _DeviceDetailScreenState extends State<DeviceDetailScreen> {
                 }
               }
               
-              // 订阅电量通知（如果支持）
+              // 不订阅电量通知，只在连接成功后读取一次
+              // 注释掉通知订阅，避免反复获取电量
+              /*
               if (characteristic.properties.notify || characteristic.properties.indicate) {
                 try {
                   await characteristic.setNotifyValue(true);
@@ -1769,6 +1835,7 @@ class _DeviceDetailScreenState extends State<DeviceDetailScreen> {
                   print('订阅标准BLE电量通知失败: $e');
                 }
               }
+              */
               return;
             }
           }
@@ -2212,12 +2279,15 @@ class DeviceInfoTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      margin: const EdgeInsets.symmetric(horizontal: 4.8, vertical: 1.2), // 进一步缩小高度: 2.4-1.2=1.2
       child: ListTile(
+        dense: true, // 使用紧凑模式
+        contentPadding: const EdgeInsets.symmetric(horizontal: 9.6, vertical: 2), // 缩小高度: 4.8-2.8=2 (约缩小20px)
+        visualDensity: const VisualDensity(horizontal: 0, vertical: -4), // 进一步压缩垂直空间
         leading: Icon(
           isConnected ? Icons.bluetooth_connected : Icons.bluetooth,
           color: isConnected ? Colors.green : Colors.grey,
-          size: 32,
+          size: 19.2,
         ),
         title: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2228,83 +2298,80 @@ class DeviceInfoTile extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // 设备名
-                  Text(
-                    _getDisplayName(deviceInfo.name),
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 4),
-                  // MAC地址和功率值上下显示
+                  // 设备名、功率值和电量一排显示
                   Row(
                     children: [
-                      // MAC地址
-                      Expanded(
+                      // 设备名
+                      Flexible(
                         child: Text(
-                          deviceInfo.address,
+                          _getDisplayName(deviceInfo.name),
                           style: const TextStyle(
+                            fontWeight: FontWeight.bold,
                             fontSize: 12,
-                            color: Colors.grey,
-                            fontFamily: 'monospace',
                           ),
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                    ],
-                  ),
-                  if (deviceInfo.rssi != null) ...[
-                    const SizedBox(height: 2),
-                    // 功率值（RSSI）
-                    Row(
-                      children: [
+                      // 功率值（RSSI）紧靠设备名显示
+                      if (deviceInfo.rssi != null) ...[
+                        const SizedBox(width: 4.8),
                         Icon(
                           Icons.signal_cellular_alt,
-                          size: 14,
+                          size: 11.2,
                           color: _getRssiColor(deviceInfo.rssi),
                         ),
-                        const SizedBox(width: 4),
+                        const SizedBox(width: 2.4),
                         Text(
-                          '${deviceInfo.rssi} dBm',
+                          '${deviceInfo.rssi}',
                           style: TextStyle(
-                            fontSize: 12,
+                            fontSize: 9.6,
                             color: _getRssiColor(deviceInfo.rssi),
                             fontWeight: FontWeight.w500,
                           ),
                         ),
                       ],
+                      // 电量紧靠功率值显示
+                      if (deviceInfo.batteryLevel != null) ...[
+                        const SizedBox(width: 4.8),
+                        Icon(
+                          _getBatteryIcon(deviceInfo.batteryLevel),
+                          size: 11.2,
+                          color: _getBatteryColor(deviceInfo.batteryLevel),
+                        ),
+                        const SizedBox(width: 2.4),
+                        Text(
+                          '${deviceInfo.batteryLevel}%',
+                          style: TextStyle(
+                            fontSize: 9.6,
+                            color: _getBatteryColor(deviceInfo.batteryLevel),
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 1.2), // 缩小间距
+                  // MAC地址
+                  Text(
+                    deviceInfo.address,
+                    style: const TextStyle(
+                      fontSize: 9.6,
+                      color: Colors.grey,
+                      fontFamily: 'monospace',
                     ),
-                  ],
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ],
               ),
             ),
-            const SizedBox(width: 8),
-            // 右侧：电量
-            if (deviceInfo.batteryLevel != null)
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    _getBatteryIcon(deviceInfo.batteryLevel),
-                    size: 20,
-                    color: _getBatteryColor(deviceInfo.batteryLevel),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    '${deviceInfo.batteryLevel}%',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: _getBatteryColor(deviceInfo.batteryLevel),
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-              ),
           ],
         ),
-        trailing: onTap != null ? const Icon(Icons.chevron_right) : null,
+        trailing: onTap != null 
+            ? Icon(
+                Icons.chevron_right,
+                size: 16,
+              )
+            : null,
         onTap: onTap,
       ),
     );
