@@ -34,7 +34,8 @@ class ScannerScreen extends StatefulWidget {
 }
 
 class _ScannerScreenState extends State<ScannerScreen> {
-  List<ScanResult> _scanResults = [];
+  List<ScanResult> _scanResults = []; // M302设备列表
+  List<ScanResult> _allScanResults = []; // 所有扫描到的设备列表
   bool _isScanning = false;
   BluetoothAdapterState _adapterState = BluetoothAdapterState.unknown;
   Map<DeviceIdentifier, BluetoothDevice> _connectedDevices = {};
@@ -68,6 +69,11 @@ class _ScannerScreenState extends State<ScannerScreen> {
   void _listenToScanResults() {
     FlutterBluePlus.scanResults.listen((results) {
       if (mounted) {
+        // 保存所有扫描结果
+        setState(() {
+          _allScanResults = results;
+        });
+        
         // 过滤出M302设备
         final m302Devices = results.where((result) {
           final deviceName = result.device.platformName;
@@ -210,7 +216,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         title: const Text('BLE Scanner'),
         actions: [
-          if (_selectedTabIndex == 0)
+          if (_selectedTabIndex == 1 || _selectedTabIndex == 2)
             IconButton(
               icon: Icon(_isScanning ? Icons.stop : Icons.search),
               onPressed: _isScanning ? _stopScan : _startScan,
@@ -250,28 +256,38 @@ class _ScannerScreenState extends State<ScannerScreen> {
                       Expanded(
                         child: _buildTabButton(
                           0,
-                          '扫描设备',
+                          '已连接',
+                          Icons.bluetooth_connected,
+                          _connectedDevices.length,
+                        ),
+                      ),
+                      Expanded(
+                        child: _buildTabButton(
+                          1,
+                          '目标设备',
                           Icons.search,
                           _scanResults.length,
                         ),
                       ),
                       Expanded(
                         child: _buildTabButton(
-                          1,
-                          '已连接',
-                          Icons.bluetooth_connected,
-                          _connectedDevices.length,
+                          2,
+                          '全部设备',
+                          Icons.devices,
+                          _allScanResults.length,
                         ),
                       ),
                     ],
                   ),
                 ),
-                if (_isScanning && _selectedTabIndex == 0)
+                if (_isScanning && (_selectedTabIndex == 1 || _selectedTabIndex == 2))
                   const LinearProgressIndicator(),
                 Expanded(
                   child: _selectedTabIndex == 0
-                      ? _buildScanTab()
-                      : _buildConnectedTab(),
+                      ? _buildConnectedTab()
+                      : _selectedTabIndex == 1
+                          ? _buildScanTab()
+                          : _buildAllDevicesTab(),
                 ),
               ],
             ),
@@ -378,7 +394,8 @@ class _ScannerScreenState extends State<ScannerScreen> {
         return DeviceTile(
           scanResult: result,
           isConnected: isConnected,
-                              onTap: () async {
+          isM302: true, // 目标设备Tab中都是M302设备
+          onTap: () async {
             // 如果已连接，直接打开详情页
             if (isConnected) {
               final device = _connectedDevices[result.device.remoteId]!;
@@ -536,18 +553,118 @@ class _ScannerScreenState extends State<ScannerScreen> {
       },
     );
   }
+
+  Widget _buildAllDevicesTab() {
+    if (_allScanResults.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.bluetooth_searching,
+              size: 64,
+              color: Colors.grey[400],
+            ),
+            const SizedBox(height: 16),
+            Text(
+              _isScanning
+                  ? '正在扫描设备...\n(显示所有扫描到的设备)'
+                  : '点击搜索按钮开始扫描\n(显示所有扫描到的设备)',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 16,
+                color: Colors.grey[600],
+              ),
+            ),
+            if (_connectedDevices.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              Text(
+                '已连接 ${_connectedDevices.length} 台设备',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.green[700],
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      itemCount: _allScanResults.length,
+      itemBuilder: (context, index) {
+        final result = _allScanResults[index];
+        final isConnected = _connectedDevices.containsKey(result.device.remoteId);
+        final isM302 = result.device.platformName == 'M302';
+        
+        return DeviceTile(
+          scanResult: result,
+          isConnected: isConnected,
+          isM302: isM302,
+          onTap: () async {
+            // 如果已连接，直接打开详情页
+            if (isConnected) {
+              final device = _connectedDevices[result.device.remoteId]!;
+              await Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => DeviceDetailScreen(
+                    device: device,
+                    autoConnect: false,
+                  ),
+                ),
+              );
+              _refreshConnectedDevices();
+              return;
+            }
+
+            // 停止扫描以加快连接速度
+            if (_isScanning) {
+              _stopScan();
+            }
+            
+            // 使用设备管理器连接（会自动保存为配对设备）
+            final connected = await _deviceManager.connectDevice(result.device);
+            if (connected) {
+              _refreshConnectedDevices();
+              // 打开详情页
+              await Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => DeviceDetailScreen(
+                    device: result.device,
+                    autoConnect: false,
+                  ),
+                ),
+              );
+              _refreshConnectedDevices();
+            } else {
+              _showSnackBar('连接失败');
+              if (mounted) {
+                _startScan();
+              }
+            }
+          },
+        );
+      },
+    );
+  }
 }
 
 class DeviceTile extends StatelessWidget {
   final ScanResult scanResult;
   final VoidCallback onTap;
   final bool isConnected;
+  final bool isM302;
 
   const DeviceTile({
     super.key,
     required this.scanResult,
     required this.onTap,
     this.isConnected = false,
+    this.isM302 = false,
   });
 
   String _getDeviceName() {
@@ -587,6 +704,23 @@ class DeviceTile extends StatelessWidget {
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
             ),
+            if (isM302)
+              Container(
+                margin: const EdgeInsets.only(right: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.blue,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Text(
+                  'M302',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
             if (isConnected)
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
