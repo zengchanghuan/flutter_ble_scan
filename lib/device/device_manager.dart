@@ -237,19 +237,66 @@ class DeviceManager {
 
   /// 手动连接设备
   Future<bool> connectDevice(BluetoothDevice device) async {
+    final deviceId = device.remoteId.toString();
+    final deviceName = device.platformName;
+    final isA400Device = deviceId.toUpperCase().contains('A40000000AE3');
+    
+    if (isA400Device) {
+      print('🔧 [DeviceManager] 开始连接A40000000AE3设备');
+      print('   - 设备ID: $deviceId');
+      print('   - 设备名称: "$deviceName"');
+      print('   - 当前连接状态: ${device.connectionState}');
+      print('   - 是否已在连接列表: ${_connectedDevices.containsKey(deviceId)}');
+    }
+    
     try {
+      print('🔧 [DeviceManager] 调用device.connect()');
+      final connectStartTime = DateTime.now();
+      
       await device.connect(
         timeout: const Duration(seconds: 1),
         autoConnect: false,
       );
       
+      final connectDuration = DateTime.now().difference(connectStartTime);
+      
+      if (isA400Device) {
+        print('🔧 [DeviceManager] device.connect()完成');
+        print('   - 连接耗时: ${connectDuration.inMilliseconds}ms');
+        print('   - 连接后状态: ${device.connectionState}');
+      }
+      
       // 添加到配对列表
       await addPairedDevice(device);
       
-      _connectedDevices[device.remoteId.toString()] = device;
+      if (isA400Device) {
+        print('🔧 [DeviceManager] 设备已添加到配对列表');
+      }
+      
+      _connectedDevices[deviceId] = device;
+      
+      if (isA400Device) {
+        print('✅ [DeviceManager] A40000000AE3设备连接成功！');
+        print('   - 已连接设备数: ${_connectedDevices.length}');
+      }
+      
       return true;
-    } catch (e) {
-      print('连接设备失败: $e');
+    } catch (e, stackTrace) {
+      if (isA400Device) {
+        print('❌ [DeviceManager] A40000000AE3设备连接失败:');
+        print('   - 异常类型: ${e.runtimeType}');
+        print('   - 异常信息: $e');
+        print('   - 堆栈跟踪:');
+        print(stackTrace);
+        print('   - 可能原因:');
+        print('     1. 连接超时（1秒内未连接成功）');
+        print('     2. 设备不在范围内');
+        print('     3. 设备拒绝连接');
+        print('     4. 蓝牙适配器问题');
+        print('     5. 设备已连接但状态未更新');
+      } else {
+        print('连接设备失败: $e');
+      }
       return false;
     }
   }
